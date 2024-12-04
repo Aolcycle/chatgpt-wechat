@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import time
+import requests
 from asyncio import CancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
 
@@ -98,6 +99,110 @@ class ChatChannel(Channel):
 
             nick_name_black_list = conf().get("nick_name_black_list", [])
             if context.get("isgroup", False):  # 群聊
+
+                self.name = self.name if self.name is not None else ""
+                pattern = f"@{re.escape(self.name)}(\u2005|\u0020)"
+                content_search = re.sub(pattern, r"", content)
+                if isinstance(context["msg"].at_list, list):
+                    for at in context["msg"].at_list:
+                        pattern = f"@{re.escape(at)}(\u2005|\u0020)"
+                        content_search = re.sub(pattern, r"", content_search)
+                if content_search == content and context["msg"].self_display_name:
+                    # 前缀移除后没有变化，使用群昵称再次移除
+                    pattern = f"@{re.escape(context['msg'].self_display_name)}(\u2005|\u0020)"
+                    content_search = re.sub(pattern, r"", content)
+
+                # 去除字符串开头和结尾的所有空格字符
+                content_search = content_search.strip()
+                # logger.info("[来消息了] content={}, content_search={}".format(content, content_search))
+                content_search = process_string(content_search)
+
+                if any(content_search.startswith(prefix) for prefix in
+                       conf().get("kfc_search_prefix")) and not content_search.startswith("搜索"):
+
+                    content_search = process_string2(content_search)
+                    user_nickname = context['msg'].actual_user_nickname
+                    reply_text = f"@{user_nickname}"
+
+                    contentSearch = remove_prefix(content_search, conf().get("kfc_search_prefix")).strip()
+
+                    def perform_search():
+                        # 初次搜索
+                        response_data = search_question(contentSearch)
+                            # if not content_search.startswith(
+                            # "全网搜") else []
+                        # if not response_data:
+                        #     # 通知用户深入搜索
+                        #     reply_text2 = f"@{user_nickname}\n正在深入搜索，请稍等..."
+                        #     self._send_reply(context, Reply(ReplyType.TEXT, reply_text2))
+                        #
+                        #     # 启动线程进行第二次搜索
+                        #     def perform_second_search():
+                        #         response_data = search_alone(contentSearch)
+                        #         send_final_reply(response_data, reply_text, context)
+                        #
+                        #     second_search_thread = threading.Thread(target=perform_second_search)
+                        #     second_search_thread.start()
+                        # else:
+                        # 如果第一次搜索找到结果，发送最终回复
+                        send_final_reply(response_data, reply_text, context, max_display=5)
+
+                    def send_final_reply(response_data, reply_text, context, max_display):
+                        is_times = 0
+                        if not response_data:
+                            reply_text_final = f"{reply_text}\n未找到，可换个关键词尝试哦~"
+                            reply_text_final += "\n⚠️宁少写，不多写、错写~"
+                            # reply_text_final += "\n--------------------"
+                            # reply_text_final += "\n可访问以下链接提交资源需求"
+                            # reply_text_final += "\nhttps://www.xinyueso.com"
+                            # reply_text_final += "\n--------------------"
+                            # reply_text_final += "\nGPT小助手分享"
+                            # reply_text_final += "\n--------------------"
+                            # reply_text_final += "\nhttps://chat.xinyuedh.com"
+                        else:
+                            reply_text_final = f"{reply_text}\n--------------------"
+                            for idx, item in enumerate(response_data[:max_display]):
+                                name = item.get("name", "未知标题")
+                                links = item.get("links", [])
+
+                                reply_text_final += f"\n{name}"
+
+                                for link in links:
+                                    reply_text_final += f"\n🌐️ {link.get('link', '未知URL')}"
+
+                                reply_text_final += "\n--------------------"
+
+                            #     if item.get('is_time') == 1:
+                            #         reply_text_final += f"\n 🌐️ {item.get('title', '未知标题')}"
+                            #         is_times += 1
+                            #     else:
+                            #         reply_text_final += f"\n{item.get('title', '未知标题')}"
+                            #     reply_text_final += f"\n{item.get('url', '未知URL')}"
+                            #     reply_text_final += "\n--------------------"
+                            #
+                            # if is_times > 0:
+                            #     reply_text_final += "\n 🌐️资源来源网络，30分钟后删除"
+                            #     reply_text_final += "\n--------------------"
+                            # else:
+                            #     reply_text_final += "\n 不是短剧？请尝试：全网搜XX"
+                            #     reply_text_final += "\n--------------------"
+
+                            if len(response_data) > max_display:
+                                reply_text_final += "\n ⚠️ 更多资源未显示，您可以前往官网查看完整内容~"
+                                reply_text_final += "\n--------------------"
+
+                            reply_text_final += "\n 🌐️资源来源网络，30分钟后删除"
+                            reply_text_final += "\n欢迎观看！如果喜欢可以喊你的朋友一起来哦"
+                            reply_text_final += "\n 更多内容请访问 https://search.kfcvivo50.cc"
+
+                        reply = Reply(ReplyType.TEXT, reply_text_final)
+                        self._send_reply(context, reply)
+
+                    # 启动线程执行第一次搜索
+                    first_search_thread = threading.Thread(target=perform_search)
+                    first_search_thread.start()
+                    return None
+
                 # 校验关键字
                 match_prefix = check_prefix(content, conf().get("group_chat_prefix"))
                 match_contain = check_contain(content, conf().get("group_chat_keyword"))
@@ -397,3 +502,62 @@ def check_contain(content, keyword_list):
         if content.find(ky) != -1:
             return True
     return None
+
+
+def remove_prefix(content, prefixes):
+    for prefix in prefixes:
+        if content.startswith(prefix):
+            return content[len(prefix):].strip()
+    return content.strip()
+
+
+def process_string(s):
+    # 判断是否以@开头并且包含"搜"字
+    if s.startswith('@') and '搜' in s:
+        # 找到"搜"字的位置
+        index = s.index('搜')
+        # 去除"搜"字前面的内容
+        return s[index:]
+    else:
+        return s
+
+
+def process_string2(s):
+    # 判断是否包含@
+    if '@' in s:
+        # 找到@字符的位置
+        index = s.index('@')
+        # 删除包含@在内后面的所有字符
+        return s[:index]
+    else:
+        return s
+
+
+def search_question(question):
+    url = conf().get("kfc_search_url", "") + '/api/wechat/search'
+    params = "{\"name\":\"" + question + "\"}"
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    try:
+        response = requests.post(url, data=params, headers=headers)
+        response.raise_for_status()  # 检查请求是否成功
+        responseData = response.json().get('list', [])
+        return responseData
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching data: {e}")
+        return []
+
+# def search_alone(question):
+#     url = conf().get("kfc_search_url", "") + '/api/other/all_search'
+#     payload = {
+#         'title': question
+#     }
+#     try:
+#         response = requests.post(url, json=payload)
+#         response.raise_for_status()
+#         responseData = response.json().get('data', [])
+#         return responseData
+#     except requests.exceptions.RequestException as e:
+#         print(f"Error fetching data: {e}")
+#         return []
